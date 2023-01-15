@@ -1,0 +1,95 @@
+name: Application Deployment
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  app-build:
+    environment:
+      name: main
+      url: ${{ steps.create_release.outputs.html_url }}
+    name: Build and publish docker images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repository: [backend, worker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Python module dependency scan
+        working-directory: application
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          DOCKER_BUILDKIT: 1
+        run: |
+          docker build -f ${{ matrix.repository }}.Dockerfile \
+            --target scan-result \
+            --output type=local,dest=${{ matrix.repository }} \
+            --build-arg SNYK_TOKEN=${SNYK_TOKEN} .
+
+      - name: Check snyk scan status
+        run: |
+          result=$( cat application/${{ matrix.repository }}/snyk.sarif | \
+            jq -r '.runs[].results | length'
+          )
+          exit $result
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v1
+        id: login-ecr
+
+      - name: Build docker image
+        working-directory: ./application
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          DOCKER_BUILDKIT: 1
+          IMAGE_TAG: ${GITHUB_SHA::8}
+        run: |
+          docker build -f ${{ matrix.repository }}.Dockerfile \
+            -t $ECR_REGISTRY/${{ matrix.repository }}:${{ env.IMAGE_TAG }} .
+
+          docker tag $ECR_REGISTRY/${{ matrix.repository }}:${{ env.IMAGE_TAG }} \
+            $ECR_REGISTRY/${{ matrix.repository }}:latest
+
+      - name: Security scan on docker image
+        uses: snyk/actions/docker@master
+        id: docker-image-scan
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ matrix.repository }}
+          args: --file=./application/${{ matrix.repository }}.Dockerfile 
+            --severity-threshold=low
+            --sarif-file-output=./application/${{ matrix.repository }}/docker.snyk.sarif
+          sarif: false
+
+      - name: Upload sarif file to Github Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v1
+        with:
+          sarif_file: application/${{ matrix.repository }}
+
+      - name: Check docker image scan status
+        if: ${{ steps.docker-image-scan.outcome == 'failure' }}
+        run: exit 1
+
+
+      - name: Publish docker image
+        if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+        run: docker push --all-tags ${{ steps.login-ecr.outputs.registry }}/${{ matrix.repository }}
+
+
+
+
