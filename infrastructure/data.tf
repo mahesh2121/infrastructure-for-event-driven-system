@@ -12,6 +12,12 @@ data "archive_file" "docker_run" {
   ]
 }
 
+data "aws_ecr_repository" "repository" {
+  for_each = toset(var.repository_list)
+  name     = each.key
+}
+
+
 data "aws_iam_policy_document" "assume_policy" {
   statement {
     actions = ["sts:AssumeRole"]
