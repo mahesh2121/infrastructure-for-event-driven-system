@@ -1,7 +1,7 @@
 terraform {
   backend "remote" {
     hostname     = "app.terraform.io"
-    organization = "pablosspot"
+    organization = "Maheshcloudx"
 
     workspaces {
       prefix = "event-driven-system-infrastructure-"
